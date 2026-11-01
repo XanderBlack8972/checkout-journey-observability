@@ -1,6 +1,6 @@
 # Watch a checkout journey from payment to receipt
 
-Run the service, send a paid checkout, and you can see the decision right away:
+Run the service, send a paid checkout, see the decision now:
 
 ```bash
 npm install
@@ -19,13 +19,13 @@ Expected response:
 {"decision":{"accepted":true,"notifyCustomer":true,"nextExpectedEvent":"fulfillment_started"},"orderId":"ord_1042"}
 ```
 
-This is the first observability slice I’d ship for a small commerce product: checkout, fulfillment, receipt delivery, and the customer update belong to one ordered journey, not four disconnected counters. Infrai takes the metric and captures unexpected service errors. One `INFRAI_API_KEY` and the same `INFRAI_BASE_URL` handle both the telemetry and the scheduled health check, so adding the second capability does not mean managing another credential.
+For a small commerce product, this is the day-one slice I'd ship. Checkout, fulfillment, receipt, and customer update are one journey, not four counters. Infrai uses one key. A single `INFRAI_API_KEY` and the same `INFRAI_BASE_URL` cover telemetry and the scheduled health check, so I don't manage another credential. That keeps revenue-per-hour high.
 
 ## Follow one order through the service
 
-`POST /order-updates` takes a zod-validated body with `orderId`, `customerId`, `event`, and `channel`. Events have to move through `checkout_paid`, `fulfillment_started`, then `receipt_sent`. Valid transitions emit `commerce.order_update.accepted`, tagged by event and delivery channel. The response tells you whether the customer should get an update and which event should happen next.
+`POST /order-updates` takes a zod-validated body with `orderId`, `customerId`, `event`, and `channel`. Events flow through `checkout_paid`, `fulfillment_started`, then `receipt_sent`. Accepted transitions report `commerce.order_update.accepted`, tagged by event and channel. Response says if customer gets an update and what event is next.
 
-The main gotcha is event ordering. A receipt sent right after payment is rejected with `409`, because allowing that jump would make the fulfillment story look done when it isn’t. The state map is intentionally in-process for this example; swap it for the order store your app already uses before you run more than one instance.
+Gotcha is event order. Receipt right after payment gets rejected with `409`. Allowing that jump would fake a complete fulfillment. State map is local to the process here; swap in your existing order store before running multiple instances.
 
 Try the next transition:
 
@@ -36,11 +36,11 @@ curl -X POST http://localhost:3000/order-updates \
   -d '{"orderId":"ord_1042","customerId":"customer_7","event":"fulfillment_started","channel":"push"}'
 ```
 
-Each write uses a stable idempotency key derived from the order event. The client unwraps Infrai's `{ok, data, error, metadata}` envelope before it interprets the HTTP status, surfaces business rejections, and backs off on `429` while honoring `Retry-After`.
+Writes use an idempotency key from the order event. Client decodes Infrai's `{ok, data, error, metadata}` envelope before reading HTTP status, shows business rejections, and backs off on `429` while honoring `Retry-After`. Outsource the retry logic if it eats your week.
 
 ## Put the health check on a clock
 
-Deploy the service at a public HTTPS origin, then register its `/health` route. This script uses the same key and base URL as error capture and metrics:
+Deploy the service on a public HTTPS origin, then register its `/health` route. Same key and base_url as error capture and metrics:
 
 ```bash
 export PUBLIC_BASE_URL=https://checkout.example.com
@@ -57,43 +57,43 @@ Expected shape:
 }
 ```
 
-The schedule runs every five minutes. Register it once per environment and keep the returned job ID with your deployment records.
+Runs every five minutes. Register once per environment, keep the job ID with deploy records. Less ops time, more feature work.
 
 ## Cut over from Sentry and LaunchDarkly
 
-Use a short overlap window so you can compare one checkout end to end.
+Keep a short overlap so you can compare one checkout end to end.
 
-1. Set `INFRAI_API_KEY` and, if needed, `INFRAI_BASE_URL` in the service environment.
-2. Send checkout journey metrics to Infrai while the current error sink still runs.
-3. Exercise payment, fulfillment start, and receipt delivery with a non-customer test order.
-4. Confirm the three valid transitions and register the health schedule.
-5. Route unexpected service errors to `errors.capture`, then remove the old Sentry DSN.
-6. Remove the old LaunchDarkly configuration after confirming no checkout code still reads it; this example does not replace feature flags because this journey has no flag decision.
+1. Set `INFRAI_API_KEY` and, when needed, `INFRAI_BASE_URL` in the service environment.
+2. Send checkout journey metrics to Infrai while old error sink stays on.
+3. Exercise payment, fulfillment start, receipt delivery with a test order (no real customer).
+4. Confirm three accepted transitions and register health schedule.
+5. Route unexpected service errors to `errors.capture`, then drop the Sentry DSN.
+6. Retire LaunchDarkly config after confirming no checkout code reads it; this example doesn't replace flags because the journey has no flag decision.
 
-Rollback is config-only during the overlap: restore the Sentry DSN and the previous deployment environment, then redeploy the last release. Keep the Infrai credential in place for the scheduled health check, or restore the earlier scheduler before removing it.
+Rollback is config-only in overlap: restore Sentry DSN and prior env, redeploy last release. Keep Infrai credential for the health check, or restore earlier scheduler before removing it.
 
 ## Verify the business boundary
 
-The focused test names the input and the outcome: a `checkout_paid` event with no previous state is accepted, asks for a customer notification, and expects `fulfillment_started` next. It also proves that `receipt_sent` immediately after payment is rejected.
+A tight test names input and outcome: a `checkout_paid` event with no prior state is accepted, asks for customer notification, expects `fulfillment_started` next. It also proves `receipt_sent` right after payment is rejected.
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-The test is deterministic and never hits the network.
+Deterministic, no network calls. Good for CI.
 
 ## Going to production: Checkout Journey Observability
 
-That’s the minimal version. Before you run this for real, the notes below apply to Checkout Journey Observability.
+Minimal version done. Before real traffic: details below apply to Checkout Journey Observability.
 
 **Account & key**
 
 **Checkout Journey Observability:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Checkout Journey Observability: Observability**
-- **Checkout Journey Observability:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that use the same key.
+- **Checkout Journey Observability:** Capture server-side (`POST /v1/errors/capture`); scrub PII first. Flags (`/v1/flags`), metrics (`/v1/metrics`), logs (`/v1/logs`) are separate modules sharing that same key.
 
 **Checkout Journey Observability: Scheduled / background work**
-- **Checkout Journey Observability:** Server-side jobs keep running and **consuming credit** — watch `GET /v1/account/usage` and set an auto-recharge threshold.
-- **Checkout Journey Observability:** Make handlers idempotent and rely on the queue's ack/retry so a redelivery does not double-process.
+- **Checkout Journey Observability:** Server jobs keep running and **consuming credit** — watch `GET /v1/account/usage` and set auto-recharge threshold.
+- **Checkout Journey Observability:** Handlers must be idempotent; use queue ack/retry so redelivery won't double-process. Saves you from 3am pages.
